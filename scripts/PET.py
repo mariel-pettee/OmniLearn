@@ -74,6 +74,14 @@ class PET(keras.Model):
                                                                    num_jet=num_jet,
                                                                    simple = simple
                                                                    )
+
+
+        output_regressor_only = self.PET_regressor(outputs_body,
+                                                   input_jet,
+                                                   num_class_layers=num_class_layers,
+                                                   num_jet=num_jet,
+                                                   simple = simple
+                                                   )
         
         outputs_generator = self.PET_generator(outputs_body,
                                                input_jet,
@@ -86,6 +94,8 @@ class PET(keras.Model):
 
         self.classifier_head = keras.Model(inputs=[outputs_body,input_jet],
                                            outputs=[outputs_classifier,outputs_regressor])
+        self.regressor_head = keras.Model(inputs=[outputs_body,input_jet],
+                                           outputs=output_regressor_only)
         self.generator_head = keras.Model(inputs=[outputs_body,input_jet,
                                                   input_mask,input_time,input_label],
                                           outputs=outputs_generator)
@@ -93,6 +103,10 @@ class PET(keras.Model):
         self.classifier = keras.Model(inputs=[input_features,input_points,input_mask,
                                               input_jet,input_time],
                                       outputs=[outputs_classifier,outputs_regressor])
+        
+        self.regressor = keras.Model(inputs=[input_features,input_points,input_mask,
+                                              input_jet,input_time],
+                                      outputs=output_regressor_only)
         self.generator = keras.Model(inputs=[input_features,input_points,input_mask,
                                              input_jet,input_time,input_label],
                                      outputs=outputs_generator)
@@ -118,6 +132,8 @@ class PET(keras.Model):
         metrics = [self.loss_tracker]
         if 'all' in self.mode or self.mode == 'classifier':
             metrics.append(self.pred_tracker)
+        if 'all' in self.mode or self.mode == 'regressor':
+            metrics.append(self.mse_tracker)
         if  'all' in self.mode or self.mode == 'generator':
             metrics.append(self.gen_tracker)
         if self.mode == 'all':
@@ -130,8 +146,12 @@ class PET(keras.Model):
     def call(self,x):
         if self.mode == 'generator':
             return self.generator(x)
-        else:
+        elif self.mode == 'classifier':
             return self.classifier(x)
+        elif self.mode == 'regressor':
+            return self.regressor(x)
+        else:
+            return self.classifier(x) # is this the default behavior we want? 
 
     def train_step(self, inputs):
         x,y = inputs
@@ -139,7 +159,7 @@ class PET(keras.Model):
         x['input_time'] = tf.zeros((batch_size,1))
         with tf.GradientTape(persistent=True) as tape:
             loss = 0.0            
-            if self.mode == 'classifier' or 'all' in self.mode:
+            if self.mode == 'classifier' or 'regressor' or 'all' in self.mode:
                 body = self.body(x)                            
             if self.mode == 'classifier' or 'all' in self.mode:
                 y_pred,y_mse = self.classifier_head([body,x['input_jet']])
@@ -148,7 +168,10 @@ class PET(keras.Model):
                 if 'all' in self.mode:    
                     loss_mse = mse(x['input_jet'],y_mse)
                     loss += loss_mse
-                
+            if self.mode == 'regressor' or 'all' in self.mode:
+                y_regress = self.regressor_head([body,x['input_jet']])
+                loss_regress = mse(x['input_jet'],y_regress)
+                loss += loss_regress     
             if self.mode == 'generator' or 'all' in self.mode:
                 t = tf.random.uniform((batch_size,1))                
                 _, alpha, sigma = get_logsnr_alpha_sigma(t)
@@ -196,8 +219,11 @@ class PET(keras.Model):
         if self.mode == 'classifier':
             trainable_vars = self.classifier_head.trainable_variables
             self.pred_tracker.update_state(y, y_pred)
-
             
+        if self.mode == 'regressor':
+            trainable_vars = self.regressor_head.trainable_variables
+            self.mse_tracker.update_state(loss_regress)
+        
         if self.mode == 'generator':
             trainable_vars = self.generator_head.trainable_variables
             self.gen_tracker.update_state(loss_part)
@@ -235,7 +261,7 @@ class PET(keras.Model):
         batch_size = tf.shape(x['input_jet'])[0]
         x['input_time'] = tf.zeros((batch_size,1))
 
-        if self.mode == 'classifier' or 'all' in self.mode:
+        if self.mode == 'classifier' or 'regressor' or 'all' in self.mode:
             body = self.body(x)
                     
         if self.mode == 'classifier' or 'all' in self.mode:
@@ -245,6 +271,11 @@ class PET(keras.Model):
             if 'all' in self.mode:
                 loss_mse = mse(x['input_jet'],y_mse)
                 loss += loss_mse
+
+        if self.mode == 'regressor' or 'all' in self.mode:
+            y_regress = self.regressor_head([body,x['input_jet']])
+            loss_regress = mse(x['input_jet'],y_regress)
+            loss += loss_regress
 
         if self.mode == 'generator' or 'all' in self.mode:
             t = tf.random.uniform((batch_size,1))                
@@ -291,7 +322,8 @@ class PET(keras.Model):
         self.loss_tracker.update_state(loss)        
         if self.mode == 'classifier' or 'all' in self.mode:
             self.pred_tracker.update_state(y, y_pred)
-            
+        if self.mode == 'regressor' or 'all' in self.mode:
+            self.mse_tracker.update_state(loss_regress)
         if self.mode == 'generator' or 'all' in self.mode:
             self.gen_tracker.update_state(loss_part)
         if  self.mode == 'all':            
@@ -423,7 +455,60 @@ class PET(keras.Model):
 
         return outputs_pred,outputs_mse
 
+    def PET_regressor(
+            self,
+            encoded,
+            input_jet,
+            num_class_layers,
+            num_jet,
+            simple = False
+    ):
+        """
+        Predicts jet mass from transformer-encoded inputs.
+        Returns: jet_mass [batch_size, 1]
+        """
 
+        #Include event information as a representative particle
+        if simple:
+            encoded = layers.GroupNormalization(groups=1)(encoded)
+            representation = layers.GlobalAveragePooling1D()(encoded)
+            jet_encoded = get_encoding(input_jet,self.projection_dim)
+            representation = layers.Dense(self.projection_dim,activation='gelu')(representation+jet_encoded)
+            output_regress = layers.Dense(1)(representation)  # regress one value (i.e. jet mass)
+        else:
+            conditional = layers.Dense(2*self.projection_dim,activation='gelu')(input_jet)
+            conditional = tf.tile(conditional[:,None, :], [1,tf.shape(encoded)[1], 1])
+            scale,shift = tf.split(conditional,2,-1)
+            encoded = encoded*(1.0 + scale) + shift
+
+            class_tokens = tf.Variable(tf.zeros(shape=(1, self.projection_dim)),trainable = True)    
+            class_tokens = tf.tile(class_tokens[None, :, :], [tf.shape(encoded)[0], 1, 1])
+                        
+            for _ in range(num_class_layers):
+                concatenated = tf.concat([class_tokens, encoded],1)
+
+                x1 = layers.GroupNormalization(groups=1)(concatenated)            
+                updates = layers.MultiHeadAttention(num_heads=self.num_heads,
+                                                    key_dim=self.projection_dim//self.num_heads)(
+                                                        query=x1[:,:1], value=x1, key=x1)
+                updates = layers.GroupNormalization(groups=1)(updates)
+                if self.layer_scale:
+                    updates = LayerScale(self.layer_scale_init, self.projection_dim)(updates)
+
+                x2 = layers.Add()([updates,class_tokens])
+                x3 = layers.GroupNormalization(groups=1)(x2)
+                x3 = layers.Dense(2*self.projection_dim,activation="gelu")(x3)
+                x3 = layers.Dropout(self.dropout)(x3)
+                x3 = layers.Dense(self.projection_dim)(x3)
+                if self.layer_scale:
+                    x3 = LayerScale(self.layer_scale_init, self.projection_dim)(x3)
+                class_tokens = layers.Add()([x3,x2])
+
+            class_tokens = layers.GroupNormalization(groups=1)(class_tokens)
+            output_regress = layers.Dense(1)(class_tokens[:, 0])  # final regression output (i.e. predicted jet mass)
+
+        return output_regress
+        
     def PET_generator(
             self,
             encoded,

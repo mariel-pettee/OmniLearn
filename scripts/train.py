@@ -125,7 +125,9 @@ def main():
     if hvd.rank() == 0:
         checkpoint_name = utils.get_model_name(flags,flags.fine_tune,
                                                add_string="_{}".format(flags.nid) if flags.nid>0 else '')
+        print(f"Checkpoint name: {checkpoint_name}")
         checkpoint_path = os.path.join(flags.folder, 'checkpoints', checkpoint_name)
+        print(f"Checkpoint path: {checkpoint_path}")
         checkpoint_callback = keras.callbacks.ModelCheckpoint(checkpoint_path,
                                                               save_best_only=True,mode='auto',
                                                               save_weights_only=True,
