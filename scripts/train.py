@@ -20,7 +20,7 @@ def parse_arguments():
     parser = argparse.ArgumentParser(description="Train the PET model on different datasets.")
     parser.add_argument("--dataset", type=str, default="jetclass", help="Dataset to use")
     parser.add_argument("--folder", type=str, default="/pscratch/sd/v/vmikuni/PET/", help="Folder containing input files")
-    parser.add_argument("--mode", type=str, default="all", help="Loss type to train the model")
+    parser.add_argument("--mode", type=str, default="all", choices=['classifier','regressor','generator','all'], help="Loss type to train the model")
     parser.add_argument("--batch", type=int, default=250, help="Batch size")
     parser.add_argument("--epoch", type=int, default=200, help="Max epoch")
     parser.add_argument("--warm_epoch", type=int, default=3, help="Warm up epochs")
@@ -89,6 +89,7 @@ def configure_optimizers(flags, train_loader, lr_factor=1.0):
 def main():
     utils.setup_gpus()
     flags = parse_arguments()
+    print(f"Training in {flags.mode} mode on the {flags.dataset} dataset.")
 
     train_loader, val_loader = get_data_loader(flags)
     
@@ -131,7 +132,7 @@ def main():
         checkpoint_callback = keras.callbacks.ModelCheckpoint(checkpoint_path,
                                                               save_best_only=True,mode='auto',
                                                               save_weights_only=True,
-                                                              period=1)
+                                                              save_freq='epoch')
         callbacks.append(checkpoint_callback)
 
     hist =  model.fit(train_loader.make_tfdata(),

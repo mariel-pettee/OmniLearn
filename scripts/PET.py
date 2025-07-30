@@ -160,7 +160,12 @@ class PET(keras.Model):
         with tf.GradientTape(persistent=True) as tape:
             loss = 0.0            
             if self.mode == 'classifier' or 'regressor' or 'all' in self.mode:
-                body = self.body(x)                            
+                body = self.body([
+                    x['input_features'],
+                    x['input_points'],
+                    x['input_mask'],
+                    x['input_time']
+                ])                            
             if self.mode == 'classifier' or 'all' in self.mode:
                 y_pred,y_mse = self.classifier_head([body,x['input_jet']])
                 loss_pred = categorical_crossentropy(y, y_pred,from_logits=True)
